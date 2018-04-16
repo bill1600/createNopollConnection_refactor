@@ -58,7 +58,7 @@ int parse_server_url (const char *full_url, server_t *server)
   return server->allow_insecure;
 }
 
-// find_server:
+// find_servers:
 // get and parse default server
 // if necessary, query dns and parse server from jwt
 // put in server_list
@@ -67,7 +67,7 @@ int parse_server_url (const char *full_url, server_t *server)
 // -2 invalid default server url
 // -1 query dns fail
 
-int find_server (server_list_t *server_list)
+int find_servers (server_list_t *server_list)
 {
   set_server_list_null (server_list);
   // parse default server URL
@@ -190,7 +190,7 @@ void free_extra_headers (create_connection_ctx_t *ctx)
     ctx->extra_headers = NULL;
 }
 
-
+// connect to current server
 int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
 {
    noPollCtx *nopoll_ctx = ctx->nopoll_ctx;
@@ -241,7 +241,7 @@ int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
 #define CONN_WAIT_ACTION_RETRY	1	// if wait_status is 307, 302, 303 or 403
 #define CONN_WAIT_RETRY_DNS 	2
 
-int connect_and_wait (create_connetion_ctx_t *ctx)
+int connect_and_wait (create_connection_ctx_t *ctx)
 {
   unsigned int force_flags = get_parodus_cfg()->flags;
   int is_ipv6 = true;
@@ -261,6 +261,7 @@ int connect_and_wait (create_connetion_ctx_t *ctx)
     wait_status_action_code = false;
     if (nopoll_connected) {
       if(nopoll_conn_is_ok(get_global_conn())) { 
+	ParodusPrint("Connected to Server but not yet ready\n");
         if(nopoll_conn_wait_until_connection_ready(get_global_conn(), 10, 
 		&wait_status, redirectURL)) 
           return CONN_WAIT_SUCCESS;
@@ -282,7 +283,18 @@ int connect_and_wait (create_connetion_ctx_t *ctx)
 	  set_extra_headers (ctx, true);
 	  wait_status_action_code = true;
 	}
-      } // nopoll_conn_is_ok
+	else
+	{
+	  ParodusError("Client connection timeout\n");	
+	  ParodusError("RDK-10037 - WebPA Connection Lost\n");
+	}
+      }
+      else // nopoll_conn not ok
+      {
+	ParodusError("Error connecting to server\n");
+	ParodusError("RDK-10037 - WebPA Connection Lost\n");
+      }
+
     } // nopoll_connected
     
     if (nopoll_connected) {
@@ -323,6 +335,7 @@ int keep_trying_connect (create_connection_ctx *ctx,
         if (c > max_retry_sleep)
           c = max_retry_sleep;
       }
+      ParodusInfo("Waiting with backoffRetryTime %d seconds\n", c);
       sleep (c);
       if (rtn == CONN_WAIT_RETRY_DNS)
         if (query_dns_status < 0)
@@ -363,7 +376,7 @@ int createNopollConnection(noPollCtx *ctx)
     int rtn = 0;
 
     set_server_list_null (&conn_ctx.server_list);
-    query_dns_status = find_server (&ctx.server_list);
+    query_dns_status = find_servers (&ctx.server_list);
     if (query_dns_status == -2)
       return nopoll_false;
     set_current_server (&conn_ctx);
