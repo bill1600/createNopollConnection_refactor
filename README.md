@@ -1,0 +1,2 @@
+# createNopollConnection_refactor
+Logic for refactoring createNopollConnection
