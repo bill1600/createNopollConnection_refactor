@@ -42,6 +42,10 @@ int server_is_null (server_t *server)
   return (0 == server->server_addr[0]);
 }
 
+// If there's a redirect server, that's it,
+// else if there's a jwt server that's it,
+// else it's the default server
+
 server_t *get_current_server (server_list_t *server_list)
 {
   if (!server_is_null (&server_list->redirect))
@@ -60,39 +64,6 @@ int parse_server_url (const char *full_url, server_t *server)
   return server->allow_insecure;
 }
 
-// find_servers:
-// get and parse default server
-// if necessary, query dns and parse server from jwt
-// put in server_list
-// returns:
-// 0 success
-// -2 invalid default server url
-// -1 query dns fail
-
-int find_servers (server_list_t *server_list)
-{
-  set_server_list_null (server_list);
-  // parse default server URL
-  parse_server_url (get_parodus_cfg()->webpa_url, &server_list->default);
-  if (server_list->default.allow_insecure < 0)
-     return -2;	// must have valid default url
-  ParodusInfo("default server_Address %s\n",server_list->default.server_addr);
-  ParodusInfo("default port %s\n", server_list->default.port);
-#ifdef FEATURE_DNS_QUERY
-  if (get_parodus_cfg()->acquire_jwt) {
-    //query dns and validate JWT
-    server_list->jwt.allow_insecure = allow_insecure_conn(
-             server_list->jwt.server_addr, SERVER_ADDR_LEN,
-             server_list->jwt.port, PORT_LEN);
-    if (server_list->jwt.allow_insecure < 0) {
-      set_server_null (&server_list->jwt);
-      return -1;
-    }
-    ParodusInfo("JWT ON: jwt_server_url stored as %s\n", server_list->jwt.server_addr);
-  }
-#endif
-  return 0;
-}
 
 typedef struct {
   int running;
@@ -159,6 +130,8 @@ char *build_extra_hdrs (header_info_t *header_info)
   return build_extra_headers( (0 < strlen(auth_token) ? auth_token : NULL),
 	header_info->device_id, header_info->user_agent, header_info->conveyHeader );
 }
+
+
  
 typedef struct {
   noPollCtx *nopoll_ctx;
@@ -191,6 +164,43 @@ void free_extra_headers (create_connection_ctx_t *ctx)
     free (ctx->extra_headers);
     ctx->extra_headers = NULL;
 }
+
+
+// find_servers:
+// get and parse default server
+// if necessary, query dns and parse server from jwt
+// populate server_list
+// return:
+
+#define FIND_SUCCESS 0
+#define FIND_INVALID_DEFAULT -2
+#define FIND_JWT_FAIL -1
+
+int find_servers (server_list_t *server_list)
+{
+  set_server_list_null (server_list);
+  // parse default server URL
+  parse_server_url (get_parodus_cfg()->webpa_url, &server_list->default);
+  if (server_list->default.allow_insecure < 0)
+     return FIND_INVALID_DEFAULT;	// must have valid default url
+  ParodusInfo("default server_Address %s\n",server_list->default.server_addr);
+  ParodusInfo("default port %s\n", server_list->default.port);
+#ifdef FEATURE_DNS_QUERY
+  if (get_parodus_cfg()->acquire_jwt) {
+    //query dns and validate JWT
+    server_list->jwt.allow_insecure = allow_insecure_conn(
+             server_list->jwt.server_addr, SERVER_ADDR_LEN,
+             server_list->jwt.port, PORT_LEN);
+    if (server_list->jwt.allow_insecure < 0) {
+      set_server_null (&server_list->jwt);
+      return FIND_JWT_FAIL;
+    }
+    ParodusInfo("JWT ON: jwt_server_url stored as %s\n", server_list->jwt.server_addr);
+  }
+#endif
+  return 0;
+}
+
 
 // connect to current server
 int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
@@ -260,7 +270,7 @@ int wait_connection_ready (create_connection_ctx_t *ctx)
 	if (strncmp (redirect_ptr, "Redirect:", 9) == 0)
 	    redirect_ptr += 9;
 	parse_server_url (redirect_ptr, &ctx->server_list.redirect);
-	set_current_server (ctx); // set current server to redirect
+	set_current_server (ctx); // set current server to redirect server
 	return WAIT_ACTION_RETRY;
   }
   if(wait_status == 403) 
@@ -344,7 +354,7 @@ int keep_trying_connect (create_connection_ctx *ctx,
       if (rtn == CONN_WAIT_ACTION_RETRY) // if redirected or build_headers
         continue;
       if (delay < max_retry_sleep) {
-        delay = delay+delay+1;
+        delay = delay+delay+1;	// 3,7,15,31 ..
         if (delay > max_retry_sleep)
           delay = max_retry_sleep;
       }
@@ -386,9 +396,8 @@ int createNopollConnection(noPollCtx *ctx)
   
 	while (true)
 	{
-	  set_server_list_null (&conn_ctx.server_list);
-	  query_dns_status = find_servers (&ctx.server_list);
-	  if (query_dns_status == -2)
+	  query_dns_status = find_servers (&conn_ctx.server_list);
+	  if (query_dns_status == FIND_INVALID_DEFAULT)
 		return nopoll_false;
 	  set_current_server (&conn_ctx);
 	  if (keep_trying_connect (&conn_ctx, max_retry_sleep, query_dns_status))
