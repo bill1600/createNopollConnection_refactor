@@ -1,11 +1,13 @@
-// createNopollConnection logic:
+// createNopollConnection_logic:
 
 // call stack:
 
 //  createNopollConnection
+//    find_servers
 //    keep_trying_connect     // keep trying till success or need to requery dns
 //      connect_and_wait      // tries both ipv6 and ipv4, if necessary
 //        nopoll_connect
+//        wait_connection_ready
 
 
 #define SERVER_ADDR_LEN 256
@@ -235,6 +237,44 @@ int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
    set_global_conn(connection);
    return (NULL != connection);
 }
+
+// Return codes for wait_connection_ready
+#define WAIT_SUCCESS	0
+#define WAIT_ACTION_RETRY	1	// if wait_status is 307, 302, 303 or 403
+#define WAIT_FAIL 	2
+
+int wait_connection_ready (create_connection_ctx_t *ctx)
+{
+  int rtn;
+  int wait_status;
+  char redirectURL[128]={'\0'};
+
+  if(nopoll_conn_wait_until_connection_ready(get_global_conn(), 10, 
+	&wait_status, redirectURL)) 
+     return WAIT_SUCCESS;
+  if(wait_status == 307 || wait_status == 302 || wait_status == 303)    // only when there is a http redirect
+  {
+	char *redirect_ptr = redirectURL;
+	ParodusError("Received temporary redirection response message %s\n", redirectURL);
+	// Extract server Address and port from the redirectURL
+	if (strncmp (redirect_ptr, "Redirect:", 9) == 0)
+	    redirect_ptr += 9;
+	parse_server_url (redirect_ptr, &ctx->server_list.redirect);
+	set_current_server (ctx); // set current server to redirect
+	return WAIT_ACTION_RETRY;
+  }
+  if(wait_status == 403) 
+  {
+	ParodusError("Received Unauthorized response with status: %d\n", wait_status);
+	free_extra_headers (ctx);
+	set_extra_headers (ctx, true);
+	return WAIT_ACTION_RETRY;
+  }
+  ParodusError("Client connection timeout\n");	
+  ParodusError("RDK-10037 - WebPA Connection Lost\n");
+  return WAIT_FAIL;
+}
+
  
 // Return codes for connect_and_wait
 #define CONN_WAIT_SUCCESS	0
@@ -246,9 +286,7 @@ int connect_and_wait (create_connection_ctx_t *ctx)
   unsigned int force_flags = get_parodus_cfg()->flags;
   int is_ipv6 = true;
   int nopoll_connected;
-  int wait_status;
-  int wait_status_action_code; // set if wait_status Is 307 302,303, or 403
-  char redirectURL[128]={'\0'};
+  int wait_rtn;
   
   if( FLAGS_IPV4_ONLY == (FLAGS_IPV4_ONLY & force_flags) ) {
     is_ipv6 = false;
@@ -258,43 +296,17 @@ int connect_and_wait (create_connection_ctx_t *ctx)
   // Once for ipv6 and once for ipv4
   while (true) {
     nopoll_connected = nopoll_connect (ctx, is_ipv6);
-    wait_status_action_code = false;
+    wait_rtn = WAIT_FAIL;
     if (nopoll_connected) {
       if(nopoll_conn_is_ok(get_global_conn())) { 
 	ParodusPrint("Connected to Server but not yet ready\n");
-        if(nopoll_conn_wait_until_connection_ready(get_global_conn(), 10, 
-		&wait_status, redirectURL)) 
+	wait_rtn = wait_connection_ready (ctx);
+        if (wait_rtn == WAIT_SUCCESS)
           return CONN_WAIT_SUCCESS;
-	if(wait_status == 307 || wait_status == 302 || wait_status == 303)    // only when there is a http redirect
-	{
-	  char *redirect_ptr = redirectURL;
-	  ParodusError("Received temporary redirection response message %s\n", redirectURL);
-	  // Extract server Address and port from the redirectURL
-	  if (strncmp (redirect_ptr, "Redirect:", 9) == 0)
-	    redirect_ptr += 9;
-	  parse_server_url (redirect_ptr, &ctx->server_list.redirect);
-	  set_current_server (ctx); // set current server to redirect
-	  wait_status_action_code = true;
-	}
-	else if(wait_status == 403) 
-	{
-	  ParodusError("Received Unauthorized response with status: %d\n", wait_status);
-	  free_extra_headers (ctx);
-	  set_extra_headers (ctx, true);
-	  wait_status_action_code = true;
-	}
-	else
-	{
-	  ParodusError("Client connection timeout\n");	
-	  ParodusError("RDK-10037 - WebPA Connection Lost\n");
-	}
-      }
-      else // nopoll_conn not ok
-      {
+      } else { // nopoll_conn not ok
 	ParodusError("Error connecting to server\n");
 	ParodusError("RDK-10037 - WebPA Connection Lost\n");
       }
-
     } // nopoll_connected
     
     if (nopoll_connected) {
@@ -302,9 +314,10 @@ int connect_and_wait (create_connection_ctx_t *ctx)
 	set_global_conn(NULL);
     }
 
-    if (wait_status_action_code)
+    if (wait_rtn == WAIT_ACTION_RETRY)
       return CONN_WAIT_ACTION_RETRY;
-      
+
+    // try ipv4 if we need to      
     if ((0==force_flags) && (0==server->allow_insecure) && is_ipv6) {
       is_ipv6 = false;
       continue;
@@ -321,25 +334,25 @@ int keep_trying_connect (create_connection_ctx *ctx,
 	int max_retry_sleep,
 	int query_dns_status)
 {
-    int c = 1;
+    int delay = 1;
     int rtn;
     while (true)
     {
       rtn = connect_and_wait (ctx);
       if (rtn == CONN_WAIT_SUCCESS)
-        return 0;
+        return true;
       if (rtn == CONN_WAIT_ACTION_RETRY) // if redirected or build_headers
         continue;
-      if (c < max_retry_sleep) {
-        c = c+c+1;
-        if (c > max_retry_sleep)
-          c = max_retry_sleep;
+      if (delay < max_retry_sleep) {
+        delay = delay+delay+1;
+        if (delay > max_retry_sleep)
+          delay = max_retry_sleep;
       }
-      ParodusInfo("Waiting with backoffRetryTime %d seconds\n", c);
-      sleep (c);
+      ParodusInfo("Waiting with backoffRetryTime %d seconds\n", delay);
+      sleep (delay);
       if (rtn == CONN_WAIT_RETRY_DNS)
         if (query_dns_status < 0)
-          return 1;  //find_server again
+          return false;  //find_server again
       // else retry
     }
 }
@@ -366,25 +379,22 @@ int createNopollConnection(noPollCtx *ctx)
 	max_retry_sleep = (int) get_parodus_cfg()->webpa_backoff_max;
 	ParodusPrint("max_retry_sleep is %d\n", max_retry_sleep );
   
-  conn_ctx.nopoll_ctx = ctx;
-  init_timer (&conn_ctx.connect_timer);
-  init_header_info (&conn_ctx.header_info);
-  set_extra_headers (&conn_ctx, false);
+	conn_ctx.nopoll_ctx = ctx;
+	init_timer (&conn_ctx.connect_timer);
+	init_header_info (&conn_ctx.header_info);
+	set_extra_headers (&conn_ctx, false);
   
-  while (true)
-  {
-    int rtn = 0;
-
-    set_server_list_null (&conn_ctx.server_list);
-    query_dns_status = find_servers (&ctx.server_list);
-    if (query_dns_status == -2)
-      return nopoll_false;
-    set_current_server (&conn_ctx);
-    rtn = keep_trying_connect (&conn_ctx, max_retry_sleep, query_dns_status);  
-    if (0 == rtn)
-      break;
-    // retry dns query
-  }
+	while (true)
+	{
+	  set_server_list_null (&conn_ctx.server_list);
+	  query_dns_status = find_servers (&ctx.server_list);
+	  if (query_dns_status == -2)
+		return nopoll_false;
+	  set_current_server (&conn_ctx);
+	  if (keep_trying_connect (&conn_ctx, max_retry_sleep, query_dns_status))
+		break;
+	  // retry dns query
+	}
       
 	if(conn_ctx.current_server->allow_insecure <= 0)
 	{
