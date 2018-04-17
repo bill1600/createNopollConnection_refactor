@@ -115,7 +115,7 @@ void init_header_info (header_info_t *header_info)
      ((0 != strlen(get_parodus_cfg()->hw_model)) ? get_parodus_cfg()->hw_model : "unknown"),
      ((0 != strlen(get_parodus_cfg()->hw_manufacturer)) ? get_parodus_cfg()->hw_manufacturer : "unknown"));
 
-  ParodusInfo("User-Agent: %s\n",user_agent);
+  ParodusInfo("User-Agent: %s\n",header_info->user_agent);
   header_info->conveyHeader = getWebpaConveyHeader();
   parStrncpy(deviceMAC, get_parodus_cfg()->hw_mac,sizeof(deviceMAC));
   snprintf(header_info->device_id, sizeof(header_info->device_id), "mac:%s", deviceMAC);
@@ -180,22 +180,22 @@ int find_servers (server_list_t *server_list)
 {
   set_server_list_null (server_list);
   // parse default server URL
-  parse_server_url (get_parodus_cfg()->webpa_url, &server_list->default);
-  if (server_list->default.allow_insecure < 0)
+  if (parse_server_url (get_parodus_cfg()->webpa_url, &server_list->default) < 0)
      return FIND_INVALID_DEFAULT;	// must have valid default url
   ParodusInfo("default server_Address %s\n",server_list->default.server_addr);
   ParodusInfo("default port %s\n", server_list->default.port);
 #ifdef FEATURE_DNS_QUERY
   if (get_parodus_cfg()->acquire_jwt) {
+    server_t *jwt_server = &server_list->jwt;
     //query dns and validate JWT
-    server_list->jwt.allow_insecure = allow_insecure_conn(
-             server_list->jwt.server_addr, SERVER_ADDR_LEN,
-             server_list->jwt.port, PORT_LEN);
-    if (server_list->jwt.allow_insecure < 0) {
-      set_server_null (&server_list->jwt);
+    jwt_server->allow_insecure = allow_insecure_conn(
+             jwt_server->server_addr, SERVER_ADDR_LEN,
+             jwt_server->port, PORT_LEN);
+    if (jwt_server->allow_insecure < 0) {
+      set_server_null (jwt_server);
       return FIND_JWT_FAIL;
     }
-    ParodusInfo("JWT ON: jwt_server_url stored as %s\n", server_list->jwt.server_addr);
+    ParodusInfo("JWT ON: jwt_server_url stored as %s\n", jwt_server->server_addr);
   }
 #endif
   return 0;
