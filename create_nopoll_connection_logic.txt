@@ -69,14 +69,14 @@ typedef struct {
   int running;
   struct timespec start_time;
   struct timespec end_time;
-} timer_t;
+} expire_timer_t;
 
-void init_timer (timer_t *timer)
+void init_expire_timer (expire_timer_t *timer)
 {
   timer->running = false;
 }
 
-int check_timer_expired (timer_t *timer, long timeout)
+int check_timer_expired (expire_timer_t *timer, long timeout)
 {
   long time_diff;
   
@@ -94,6 +94,29 @@ int check_timer_expired (timer_t *timer, long timeout)
     return true;
   return false;
 }
+
+typedef struct {
+  int max_delay;
+  int delay;
+} backoff_timer_t;
+
+void init_backoff_timer (backoff_timer_t *timer, int max_delay)
+{
+  timer->max_delay = max_delay;
+  timer->delay = 1;
+}
+
+void backoff_delay (backoff_timer_t *timer)
+{
+  if (timer->delay < timer->max_delay)
+    timer->delay = timer->delay + timer->delay + 1;
+    // 3,7,15,31 ..
+  if (timer->delay > timer->max_delay)
+    timer->delay = timer->max_delay;
+  ParodusInfo("Waiting with backoffRetryTime %d seconds\n", timer->delay);
+  sleep (timer->delay);
+}  
+
 
 typedef struct {
   char *conveyHeader;
@@ -139,7 +162,7 @@ typedef struct {
   server_t *current_server;
   header_info_t header_info;
   char *extra_headers;		// need to be freed ?
-  timer_t connect_timer;
+  expire_timer_t connect_timer;
 } create_connection_ctx_t;
 
 void set_current_server (create_connection_ctx_t *ctx)
@@ -344,8 +367,11 @@ int keep_trying_connect (create_connection_ctx *ctx,
 	int max_retry_sleep,
 	int query_dns_status)
 {
-    int delay = 1;
+    backoff_timer_t backoff_timer;
     int rtn;
+    
+    init_backoff_timer (&backoff_timer, max_retry_sleep);
+
     while (true)
     {
       rtn = connect_and_wait (ctx);
@@ -353,13 +379,7 @@ int keep_trying_connect (create_connection_ctx *ctx,
         return true;
       if (rtn == CONN_WAIT_ACTION_RETRY) // if redirected or build_headers
         continue;
-      if (delay < max_retry_sleep) {
-        delay = delay+delay+1;	// 3,7,15,31 ..
-        if (delay > max_retry_sleep)
-          delay = max_retry_sleep;
-      }
-      ParodusInfo("Waiting with backoffRetryTime %d seconds\n", delay);
-      sleep (delay);
+      backoff_delay (&backoff_timer); 3,7,15,31 ..
       if (rtn == CONN_WAIT_RETRY_DNS)
         if (query_dns_status < 0)
           return false;  //find_server again
@@ -390,7 +410,7 @@ int createNopollConnection(noPollCtx *ctx)
 	ParodusPrint("max_retry_sleep is %d\n", max_retry_sleep );
   
 	conn_ctx.nopoll_ctx = ctx;
-	init_timer (&conn_ctx.connect_timer);
+	init_expire_timer (&conn_ctx.connect_timer);
 	init_header_info (&conn_ctx.header_info);
 	set_extra_headers (&conn_ctx, false);
   
