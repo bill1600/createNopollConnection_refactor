@@ -10,6 +10,7 @@
 //        wait_connection_ready
 
 
+//--------------------------------------------------------------------
 #define SERVER_ADDR_LEN 256
 #define PORT_LEN 8
 
@@ -20,24 +21,25 @@ typedef struct {
 } server_t;
 
 typedef struct {
-  server_t default;
-  server_t jwt;
-  server_t redirect;
+  server_t default;	// from command line
+  server_t jwt;		// from jwt endpoint claim
+  server_t redirect;	// from redirect response to
+			//  nopoll_conn_wait_until_connection_ready
 } server_list_t;
 
-void set_server_null (server_t *server)
+static void set_server_null (server_t *server)
 {
   server->server_addr[0] = 0;
 }
 
-void set_server_list_null (server_list_t *server_list)
+static void set_server_list_null (server_list_t *server_list)
 {
   set_server_null (&server_list->default);
   set_server_null (&server_list->jwt);
   set_server_null (&server_list->redirect);
 }
 
-int server_is_null (server_t *server)
+static int server_is_null (server_t *server)
 {
   return (0 == server->server_addr[0]);
 }
@@ -46,7 +48,7 @@ int server_is_null (server_t *server)
 // else if there's a jwt server that's it,
 // else it's the default server
 
-server_t *get_current_server (server_list_t *server_list)
+static server_t *get_current_server (server_list_t *server_list)
 {
   if (!server_is_null (&server_list->redirect))
     return &server_list->redirect;
@@ -56,27 +58,26 @@ server_t *get_current_server (server_list_t *server_list)
 }
 
   
-
-int parse_server_url (const char *full_url, server_t *server)
+static int parse_server_url (const char *full_url, server_t *server)
 {
   server->allow_insecure = parse_webpa_url (full_url,
 	server->server_addr, SERVER_ADDR_LEN, server->port, PORT_LEN);
   return server->allow_insecure;
 }
 
-
+//--------------------------------------------------------------------
 typedef struct {
   int running;
   struct timespec start_time;
   struct timespec end_time;
 } expire_timer_t;
 
-void init_expire_timer (expire_timer_t *timer)
+static void init_expire_timer (expire_timer_t *timer)
 {
   timer->running = false;
 }
 
-int check_timer_expired (expire_timer_t *timer, long timeout)
+static int check_timer_expired (expire_timer_t *timer, long timeout)
 {
   long time_diff;
   
@@ -95,18 +96,19 @@ int check_timer_expired (expire_timer_t *timer, long timeout)
   return false;
 }
 
+//--------------------------------------------------------------------
 typedef struct {
   int max_delay;
   int delay;
 } backoff_timer_t;
 
-void init_backoff_timer (backoff_timer_t *timer, int max_delay)
+static void init_backoff_timer (backoff_timer_t *timer, int max_delay)
 {
   timer->max_delay = max_delay;
   timer->delay = 1;
 }
 
-void backoff_delay (backoff_timer_t *timer)
+static void backoff_delay (backoff_timer_t *timer)
 {
   if (timer->delay < timer->max_delay)
     timer->delay = timer->delay + timer->delay + 1;
@@ -117,14 +119,14 @@ void backoff_delay (backoff_timer_t *timer)
   sleep (timer->delay);
 }  
 
-
+//--------------------------------------------------------------------
 typedef struct {
   char *conveyHeader;
   char device_id[32];
   char user_agent[512];
 } header_info_t;
 
-void init_header_info (header_info_t *header_info)
+static void init_header_info (header_info_t *header_info)
 {
   char deviceMAC[32]={'\0'};
 
@@ -146,7 +148,7 @@ void init_header_info (header_info_t *header_info)
   
 }
 
-char *build_extra_hdrs (header_info_t *header_info)
+static char *build_extra_hdrs (header_info_t *header_info)
 // result must be freed
 {
   char *auth_token = get_parodus_cfg()->webpa_auth_token;
@@ -155,7 +157,10 @@ char *build_extra_hdrs (header_info_t *header_info)
 }
 
 
- 
+//--------------------------------------------------------------------
+// connection context which is defined in createNopollConnection
+// and passed into functions keep_retrying_connect, connect_and_wait,
+// wait_connection_reeady, and nopoll_connect 
 typedef struct {
   noPollCtx *nopoll_ctx;
   server_list_t server_list;
@@ -165,12 +170,12 @@ typedef struct {
   expire_timer_t connect_timer;
 } create_connection_ctx_t;
 
-void set_current_server (create_connection_ctx_t *ctx)
+static void set_current_server (create_connection_ctx_t *ctx)
 {
   ctx->current_server = get_current_server (&ctx->server_list);
 }
 
-void set_extra_headers (create_connection_ctx_t *ctx, int reauthorize)
+static void set_extra_headers (create_connection_ctx_t *ctx, int reauthorize)
 {
   if (reauthorize && (strlen(get_parodus_cfg()->token_acquisition_script) >0))
   {
@@ -181,7 +186,7 @@ void set_extra_headers (create_connection_ctx_t *ctx, int reauthorize)
   ctx->extra_headers = build_extra_hdrs (&ctx->header_info);
 }
 
-void free_extra_headers (create_connection_ctx_t *ctx)
+static void free_extra_headers (create_connection_ctx_t *ctx)
 {
   if (NULL != ctx->extra_headers) {
     free (ctx->extra_headers);
@@ -189,6 +194,7 @@ void free_extra_headers (create_connection_ctx_t *ctx)
 }
 
 
+//--------------------------------------------------------------------
 // find_servers:
 // get and parse default server
 // if necessary, query dns and parse server from jwt
@@ -199,14 +205,15 @@ void free_extra_headers (create_connection_ctx_t *ctx)
 #define FIND_INVALID_DEFAULT -2
 #define FIND_JWT_FAIL -1
 
-int find_servers (server_list_t *server_list)
+static int find_servers (server_list_t *server_list)
 {
+  server_t *default_server = &server_list->default;
   set_server_list_null (server_list);
   // parse default server URL
-  if (parse_server_url (get_parodus_cfg()->webpa_url, &server_list->default) < 0)
+  if (parse_server_url (get_parodus_cfg()->webpa_url, default_server) < 0)
      return FIND_INVALID_DEFAULT;	// must have valid default url
-  ParodusInfo("default server_Address %s\n",server_list->default.server_addr);
-  ParodusInfo("default port %s\n", server_list->default.port);
+  ParodusInfo("default server_Address %s\n", default_server->server_addr);
+  ParodusInfo("default port %s\n", default_server->port);
 #ifdef FEATURE_DNS_QUERY
   if (get_parodus_cfg()->acquire_jwt) {
     server_t *jwt_server = &server_list->jwt;
@@ -225,8 +232,9 @@ int find_servers (server_list_t *server_list)
 }
 
 
+//--------------------------------------------------------------------
 // connect to current server
-int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
+static int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
 {
    noPollCtx *nopoll_ctx = ctx->nopoll_ctx;
    server_t *server = ctx->current_server;
@@ -271,12 +279,13 @@ int nopoll_connect (create_connection_ctx_t *ctx, int is_ipv6)
    return (NULL != connection);
 }
 
+//--------------------------------------------------------------------
 // Return codes for wait_connection_ready
 #define WAIT_SUCCESS	0
 #define WAIT_ACTION_RETRY	1	// if wait_status is 307, 302, 303 or 403
 #define WAIT_FAIL 	2
 
-int wait_connection_ready (create_connection_ctx_t *ctx)
+static int wait_connection_ready (create_connection_ctx_t *ctx)
 {
   int rtn;
   int wait_status;
@@ -309,12 +318,13 @@ int wait_connection_ready (create_connection_ctx_t *ctx)
 }
 
  
+//--------------------------------------------------------------------
 // Return codes for connect_and_wait
 #define CONN_WAIT_SUCCESS	0
 #define CONN_WAIT_ACTION_RETRY	1	// if wait_status is 307, 302, 303 or 403
 #define CONN_WAIT_RETRY_DNS 	2
 
-int connect_and_wait (create_connection_ctx_t *ctx)
+static int connect_and_wait (create_connection_ctx_t *ctx)
 {
   unsigned int force_flags = get_parodus_cfg()->flags;
   int is_ipv6 = true;
@@ -360,10 +370,11 @@ int connect_and_wait (create_connection_ctx_t *ctx)
   }
 }
 
+//--------------------------------------------------------------------
 // Tries to connect until
 // a) success, or
 // b) need to requery dns
-int keep_trying_connect (create_connection_ctx *ctx, 
+static int keep_trying_to_connect (create_connection_ctx *ctx, 
 	int max_retry_sleep,
 	int query_dns_status)
 {
@@ -387,6 +398,8 @@ int keep_trying_connect (create_connection_ctx *ctx,
     }
 }
 
+
+//--------------------------------------------------------------------
 
 /**
  * @brief createNopollConnection interface to create WebSocket client connections.
@@ -420,7 +433,7 @@ int createNopollConnection(noPollCtx *ctx)
 	  if (query_dns_status == FIND_INVALID_DEFAULT)
 		return nopoll_false;
 	  set_current_server (&conn_ctx);
-	  if (keep_trying_connect (&conn_ctx, max_retry_sleep, query_dns_status))
+	  if (keep_trying_to_connect (&conn_ctx, max_retry_sleep, query_dns_status))
 		break;
 	  // retry dns query
 	}
